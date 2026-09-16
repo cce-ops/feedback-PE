@@ -60,14 +60,12 @@ FORMATOS_SOPORTADOS = ["pdf", "pptx", "xlsx", "xls", "csv", "docx", "txt", "py",
 # FUNCIONES PARA EXTRACCIÓN DE TEXTO SEGÚN EL TIPO DE ARCHIVO
 # -----------------------------------------------------------------------------
 def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
-    """
-    Procesa un archivo indicando la ruta en disco (string) o un objeto de subida (UploadedFile/BytesIO).
-    """
+    """Procesa un archivo indicando la ruta en disco (string) o un objeto de subida."""
     nombre = (filename_hint if filename_hint else getattr(file_obj, "name", str(file_obj))).lower()
     
     if nombre.endswith(".pdf"):
         if not HAS_PYPDF:
-            return "Error: Falta la librería 'pypdf'. Ejecuta 'pip install pypdf'."
+            return "Error: Falta la librería 'pypdf'."
         try:
             reader = pypdf.PdfReader(file_obj)
             texto = ""
@@ -81,7 +79,7 @@ def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
 
     elif nombre.endswith(".pptx"):
         if not HAS_PPTX:
-            return "Error: Falta la librería 'python-pptx'. Ejecuta 'pip install python-pptx'."
+            return "Error: Falta la librería 'python-pptx'."
         try:
             prs = Presentation(file_obj)
             texto = ""
@@ -96,7 +94,7 @@ def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
 
     elif nombre.endswith((".xlsx", ".xls")):
         if not HAS_PANDAS:
-            return "Error: Falta la librería 'pandas' o 'openpyxl'. Ejecuta 'pip install pandas openpyxl'."
+            return "Error: Falta la librería 'pandas' o 'openpyxl'."
         try:
             excel_file = pd.ExcelFile(file_obj)
             texto = ""
@@ -110,7 +108,7 @@ def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
 
     elif nombre.endswith(".csv"):
         if not HAS_PANDAS:
-            return "Error: Falta la librería 'pandas'. Ejecuta 'pip install pandas'."
+            return "Error: Falta la librería 'pandas'."
         try:
             df = pd.read_csv(file_obj)
             return "--- ARCHIVO CSV ---\n" + df.to_string(index=False)
@@ -119,7 +117,7 @@ def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
 
     elif nombre.endswith(".docx"):
         if not HAS_DOCX:
-            return "Error: Falta la librería 'python-docx'. Ejecuta 'pip install python-docx'."
+            return "Error: Falta la librería 'python-docx'."
         try:
             doc = docx.Document(file_obj)
             return "\n".join([p.text for p in doc.paragraphs if p.text])
@@ -160,8 +158,12 @@ def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
 
     return "Formato de archivo no soportado."
 
+# -----------------------------------------------------------------------------
+# CACHÉ DE MATERIALES PARA EVITAR SOBRECARGA EN LA NUBE
+# -----------------------------------------------------------------------------
+@st.cache_resource
 def cargar_materiales_predeterminados():
-    """Escanea la carpeta local 'materiales' y extrae el texto automáticamente al iniciar la app."""
+    """Escanea la carpeta local 'materiales' y procesa los documentos una sola vez."""
     base_conocimiento = {}
     if os.path.exists(CARPETA_MATERIALES):
         archivos = os.listdir(CARPETA_MATERIALES)
@@ -181,7 +183,7 @@ if "base_conocimiento" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "¡Hola! Soy tu tutor orientador. Dime en qué sección, script de Python/MATLAB o archivo de tu entrega tienes dudas y te indicaré de forma directa qué debes revisar y cómo corregirlo."}
+        {"role": "assistant", "content": "¡Hola! Soy tu tutor orientador. Dime en qué sección, script de Python/MATLAB o archivo de tu entrega tienes dudas y te indicaré qué debes revisar."}
     ]
 
 def obtener_contexto_asignatura():
@@ -195,38 +197,49 @@ def obtener_contexto_asignatura():
     return contexto
 
 # -----------------------------------------------------------------------------
-# FUNCIONES DE CONSULTA (GEMINI VS OLLAMA LOCAL)
+# FUNCIONES DE CONSULTA CON REINTENTOS AUTOMÁTICOS (ROBUSTEZ Y ANTI-CUELGUES)
 # -----------------------------------------------------------------------------
-def consultar_gemini(prompt_sistema, prompt_usuario, api_key, modelo_seleccionado):
-    """Realiza la llamada a la API de Google Gemini en la nube."""
+def consultar_gemini_con_reintentos(prompt_sistema, prompt_usuario, api_key, modelo_seleccionado, max_retries=3):
+    """Realiza llamadas a Gemini con reintentos exponenciales si se detecta saturación."""
     if not HAS_GEMINI:
         return "Error: El paquete 'google-genai' no está instalado."
     if not api_key:
-        return "⚠️ Por favor, introduce tu API Key de Gemini en el menú lateral."
+        return "⚠️ Por favor, introduce tu API Key de Gemini en el menú lateral o en los Secretos de Streamlit Cloud."
     
-    try:
-        client = genai.Client(api_key=api_key)
-        contenido_completo = f"{prompt_sistema}\n\nENTRADA DEL USUARIO:\n{prompt_usuario}"
-        
-        response = client.models.generate_content(
-            model=modelo_seleccionado,
-            contents=contenido_completo,
-            config=types.GenerateContentConfig(temperature=0.3)
-        )
-        return response.text
-    except Exception as e:
-        error_str = str(e)
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            return f"⚠️ El modelo **{modelo_seleccionado}** está saturado. Puedes cambiar a **Modo Local (Ollama)** en el menú lateral para continuar sin depender de Google."
-        return f"Error al comunicarse con Gemini ({modelo_seleccionado}): {error_str}"
+    contenido_completo = f"{prompt_sistema}\n\nENTRADA DEL USUARIO:\n{prompt_usuario}"
+    client = genai.Client(api_key=api_key)
+
+    for intento in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=modelo_seleccionado,
+                contents=contenido_completo,
+                config=types.GenerateContentConfig(temperature=0.3)
+            )
+            return response.text
+        except Exception as e:
+            error_str = str(e)
+            # Si se alcanza el límite de velocidad/cuota o sobrecarga temporal
+            if ("429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "503" in error_str) and intento < max_retries - 1:
+                tiempo_espera = (intento + 1) * 3  # Espera progresiva: 3s, 6s...
+                time.sleep(tiempo_espera)
+                continue
+            
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                return (
+                    f"⚠️ El servidor de Gemini informa sobrecarga con **{modelo_seleccionado}**.\n\n"
+                    "**Solución rápida:** Selecciona el modelo **gemini-3.5-flash-lite** o **gemini-3.1-flash-lite** en el menú lateral e inténtalo de nuevo."
+                )
+            return f"Error al comunicarse con Gemini ({modelo_seleccionado}): {error_str}"
 
 def consultar_ollama_local(prompt_sistema, prompt_usuario, modelo_local):
-    """Realiza la llamada al motor local Ollama ejecutado en el sistema."""
+    """Realiza la llamada al motor local Ollama en caso de ejecución en máquina local."""
     if not HAS_OLLAMA:
-        return "Error: El paquete 'ollama' no está instalado. Ejecuta 'pip install ollama'."
+        return "Error: El paquete 'ollama' no está instalado."
     
     try:
-        response = ollama.chat(
+        client_ollama = ollama.Client(host="http://127.0.0.1:11434")
+        response = client_ollama.chat(
             model=modelo_local,
             messages=[
                 {"role": "system", "content": prompt_sistema},
@@ -236,17 +249,17 @@ def consultar_ollama_local(prompt_sistema, prompt_usuario, modelo_local):
         )
         return response['message']['content']
     except Exception as e:
-        return f"⚠️ Error al conectar con Ollama en local: {str(e)}. Asegúrate de que Ollama esté abierto y ejecutándose en tu ordenador (`ollama run {modelo_local}`)."
+        return f"⚠️ Error al conectar con Ollama en local: {str(e)}."
 
 # -----------------------------------------------------------------------------
-# BARRA LATERAL: SELECCIÓN DE PROVEEDOR (NUBE VS LOCAL) Y MODELOS
+# BARRA LATERAL: SELECCIÓN DE PROVEEDOR Y MODELOS
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Configuración del Motor")
     
     proveedor = st.radio(
         "Proveedor de IA:",
-        options=["☁️ Google Gemini (Nube)", "💻 Ollama (100% Local)"],
+        options=["☁️ Google Gemini (Nube)", "💻 Ollama (Local)"],
         index=0
     )
 
@@ -254,22 +267,23 @@ with st.sidebar:
         api_key_env = os.environ.get("GEMINI_API_KEY", "")
         api_key = st.text_input("Gemini API Key:", value=api_key_env, type="password", help="Obtén tu clave en Google AI Studio.")
 
+        # Establecer como predeterminado un modelo Flash-Lite de alta disponibilidad
         modelo_seleccionado = st.selectbox(
             "Modelo Gemini:",
             options=[
-                "gemini-3.6-flash",
-                "gemini-3.5-flash",
                 "gemini-3.5-flash-lite",
-                "gemini-3.1-flash-lite"
+                "gemini-3.1-flash-lite",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash"
             ],
-            index=0
+            index=0,
+            help="gemini-3.5-flash-lite es la opción recomendada para evitar retrasos y saturaciones en entregas concurrentes."
         )
     else:
         api_key = None
         modelo_seleccionado = st.text_input(
             "Modelo Local (Ollama):",
-            value="llama3.2",
-            help="Escribe el nombre del modelo que has descargado en Ollama (ej. llama3.2, mistral, qwen2.5-coder)."
+            value="llama3.2"
         )
 
     st.markdown("---")
@@ -286,24 +300,24 @@ with st.sidebar:
             st.write(user_prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Analizando tu consulta con los materiales..."):
+            with st.spinner("Analizando consulta..."):
                 contexto_mat = obtener_contexto_asignatura()
                 
                 system_prompt_orientador = f"""
                 Eres un tutor docente universitario experto, claro, directo y didáctico.
-                Tu objetivo es señalar con precisión los errores u omisiones del estudiante en sus memorias o scripts de código (Python/MATLAB) y explicarle cómo corregirlos.
+                Tu objetivo es señalar con precisión los errores u omisiones del estudiante en sus memorias o scripts de código y explicarle cómo corregirlos.
 
                 REGLAS DE ACTUACIÓN:
                 1. SÉ DIRECTO Y ESPECÍFICO: Señala claramente qué concepto, fórmula, script, función o parámetro está equivocado o falta.
                 2. EXPLICA EL POR QUÉ: Basándote en el conocimiento de la asignatura, explica por qué está mal o incompleto.
-                3. GUÍA SIN REGALAR LA SOLUCIÓN FINAL: Explica la metodología o los pasos exactos para solucionarlo, pero deja que el alumno redacte el texto final o escriba las líneas de código finales.
+                3. GUÍA SIN REGALAR LA SOLUCIÓN FINAL: Explica la metodología o los pasos exactos para solucionarlo, pero deja que el alumno redacte el texto final o escriba el código final.
                 
                 CONOCIMIENTO DE LA ASIGNATURA DISPONIBLE:
                 {contexto_mat}
                 """
                 
                 if proveedor == "☁️ Google Gemini (Nube)":
-                    respuesta_bot = consultar_gemini(system_prompt_orientador, user_prompt, api_key, modelo_seleccionado)
+                    respuesta_bot = consultar_gemini_con_reintentos(system_prompt_orientador, user_prompt, api_key, modelo_seleccionado)
                 else:
                     respuesta_bot = consultar_ollama_local(system_prompt_orientador, user_prompt, modelo_seleccionado)
 
@@ -377,19 +391,19 @@ with tab_evaluador:
         if not contenido_estudiante.strip():
             st.error("Por favor, sube al menos un archivo o escribe comentarios antes de analizar.")
         else:
-            with st.spinner(f"Analizando entregables con {proveedor} ({modelo_seleccionado})..."):
+            with st.spinner(f"Generando feedback con {modelo_seleccionado}..."):
                 contexto_docente = obtener_contexto_asignatura()
                 
                 system_prompt_evaluador = f"""
                 Eres un evaluador académico experto para esta asignatura.
-                Tu tarea es analizar el conjunto de entregables presentados por el estudiante (que pueden incluir documentos, diapositivas, hojas de cálculo o código fuente en Python/MATLAB) y generar un informe de feedback detallado y estructurado.
+                Tu tarea es analizar el conjunto de entregables presentados por el estudiante y generar un informe de feedback detallado y estructurado.
                 
                 MATERIALES DE REFERENCIA DE LA ASIGNATURA:
                 {contexto_docente}
                 
                 INSTRUCCIONES DE EVALUACIÓN:
                 1. Revisa de forma conjunta todos los entregables subidos por el estudiante.
-                2. Compara el trabajo entregado (documentos y/o código) directamente con los conceptos, metodologías y soluciones de los materiales oficiales de la asignatura.
+                2. Compara el trabajo entregado directamente con los conceptos, metodologías y soluciones de los materiales oficiales de la asignatura.
                 3. REGLA DE ORO DE FIABILIDAD: Evalúa el trabajo del alumno basándote ÚNICAMENTE en la información explícita de los MATERIALES DE REFERENCIA. Si el trabajo aborda un tema o concepto que NO está en los materiales, indica textualmente: 'Este punto no puede ser verificado con los materiales actuales del curso'.
                 4. Estructura el feedback en formato Markdown obligatoriamente con las siguientes secciones:
                    - **Resumen Ejecutivo:** (Valoración general en 2 o 3 frases).
@@ -401,7 +415,7 @@ with tab_evaluador:
                 """
                 
                 if proveedor == "☁️ Google Gemini (Nube)":
-                    resultado_feedback = consultar_gemini(system_prompt_evaluador, contenido_estudiante, api_key, modelo_seleccionado)
+                    resultado_feedback = consultar_gemini_con_reintentos(system_prompt_evaluador, contenido_estudiante, api_key, modelo_seleccionado)
                 else:
                     resultado_feedback = consultar_ollama_local(system_prompt_evaluador, contenido_estudiante, modelo_seleccionado)
 
@@ -414,7 +428,7 @@ with tab_evaluador:
 # -----------------------------------------------------------------------------
 with tab_profesor:
     st.subheader("📚 Materiales Oficiales del Curso")
-    st.write("Los siguientes archivos provienen de la carpeta `/materiales` del repositorio de la asignatura y son utilizados por la IA como fuente oficial de conocimiento.")
+    st.write("Los siguientes archivos provienen de la carpeta `/materiales` del repositorio de la asignatura.")
 
     if st.session_state.base_conocimiento:
         for doc_name, text_content in st.session_state.base_conocimiento.items():
@@ -423,6 +437,7 @@ with tab_profesor:
                 st.text(text_content[:600] + ("..." if len(text_content) > 600 else ""))
         
         if st.button("🔄 Recargar materiales desde la carpeta '/materiales'"):
+            st.cache_resource.clear()
             st.session_state.base_conocimiento = cargar_materiales_predeterminados()
             st.rerun()
     else:
