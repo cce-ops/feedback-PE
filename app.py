@@ -37,6 +37,13 @@ try:
 except ImportError:
     HAS_GEMINI = False
 
+# Librería Oficial de Ollama (IA Local)
+try:
+    import ollama
+    HAS_OLLAMA = True
+except ImportError:
+    HAS_OLLAMA = False
+
 # -----------------------------------------------------------------------------
 # CONFIGURACIÓN DE PÁGINA Y DIRECTORIOS
 # -----------------------------------------------------------------------------
@@ -55,7 +62,6 @@ FORMATOS_SOPORTADOS = ["pdf", "pptx", "xlsx", "xls", "csv", "docx", "txt", "py",
 def procesar_archivo_path_o_bytes(file_obj, filename_hint=""):
     """
     Procesa un archivo indicando la ruta en disco (string) o un objeto de subida (UploadedFile/BytesIO).
-    Soporta documentos, hojas de cálculo, presentaciones y archivos de código (Python, MATLAB).
     """
     nombre = (filename_hint if filename_hint else getattr(file_obj, "name", str(file_obj))).lower()
     
@@ -188,10 +194,13 @@ def obtener_contexto_asignatura():
         contexto += f"--- ARCHIVO FUENTE: {nombre_file} ---\n{contenido}\n\n"
     return contexto
 
+# -----------------------------------------------------------------------------
+# FUNCIONES DE CONSULTA (GEMINI VS OLLAMA LOCAL)
+# -----------------------------------------------------------------------------
 def consultar_gemini(prompt_sistema, prompt_usuario, api_key, modelo_seleccionado):
-    """Realiza la llamada a la API de Gemini con el modelo especificado."""
+    """Realiza la llamada a la API de Google Gemini en la nube."""
     if not HAS_GEMINI:
-        return "Error: El paquete 'google-genai' no está instalado. Ejecuta 'pip install google-genai'."
+        return "Error: El paquete 'google-genai' no está instalado."
     if not api_key:
         return "⚠️ Por favor, introduce tu API Key de Gemini en el menú lateral."
     
@@ -208,29 +217,60 @@ def consultar_gemini(prompt_sistema, prompt_usuario, api_key, modelo_seleccionad
     except Exception as e:
         error_str = str(e)
         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-            return f"⚠️ El modelo **{modelo_seleccionado}** está saturado o has alcanzado el límite de cuota. Prueba seleccionando un modelo alternativo como **gemini-3.5-flash-lite** o **gemini-3.1-flash-lite** en el menú lateral."
-        return f"Error al comunicarse con la API de Gemini ({modelo_seleccionado}): {error_str}"
+            return f"⚠️ El modelo **{modelo_seleccionado}** está saturado. Puedes cambiar a **Modo Local (Ollama)** en el menú lateral para continuar sin depender de Google."
+        return f"Error al comunicarse con Gemini ({modelo_seleccionado}): {error_str}"
+
+def consultar_ollama_local(prompt_sistema, prompt_usuario, modelo_local):
+    """Realiza la llamada al motor local Ollama ejecutado en el sistema."""
+    if not HAS_OLLAMA:
+        return "Error: El paquete 'ollama' no está instalado. Ejecuta 'pip install ollama'."
+    
+    try:
+        response = ollama.chat(
+            model=modelo_local,
+            messages=[
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": prompt_usuario}
+            ],
+            options={"temperature": 0.3}
+        )
+        return response['message']['content']
+    except Exception as e:
+        return f"⚠️ Error al conectar con Ollama en local: {str(e)}. Asegúrate de que Ollama esté abierto y ejecutándose en tu ordenador (`ollama run {modelo_local}`)."
 
 # -----------------------------------------------------------------------------
-# BARRA LATERAL: CONFIGURACIÓN, MODELOS Y TUTOR ORIENTADOR
+# BARRA LATERAL: SELECCIÓN DE PROVEEDOR (NUBE VS LOCAL) Y MODELOS
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Configuración del Motor")
-    api_key_env = os.environ.get("GEMINI_API_KEY", "")
-    api_key = st.text_input("Gemini API Key:", value=api_key_env, type="password", help="Obtén tu clave en Google AI Studio.")
-
-    # SELECTOR DE MODELOS
-    modelo_seleccionado = st.selectbox(
-        "Selecciona el Modelo de IA:",
-        options=[
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-lite"
-        ],
-        index=0,
-        help="Si un modelo reporta saturación, selecciona una versión Flash-Lite para mayor capacidad y rapidez de respuesta."
+    
+    proveedor = st.radio(
+        "Proveedor de IA:",
+        options=["☁️ Google Gemini (Nube)", "💻 Ollama (100% Local)"],
+        index=0
     )
+
+    if proveedor == "☁️ Google Gemini (Nube)":
+        api_key_env = os.environ.get("GEMINI_API_KEY", "")
+        api_key = st.text_input("Gemini API Key:", value=api_key_env, type="password", help="Obtén tu clave en Google AI Studio.")
+
+        modelo_seleccionado = st.selectbox(
+            "Modelo Gemini:",
+            options=[
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite"
+            ],
+            index=0
+        )
+    else:
+        api_key = None
+        modelo_seleccionado = st.text_input(
+            "Modelo Local (Ollama):",
+            value="llama3.2",
+            help="Escribe el nombre del modelo que has descargado en Ollama (ej. llama3.2, mistral, qwen2.5-coder)."
+        )
 
     st.markdown("---")
     st.header("🤖 Tutor Orientador")
@@ -262,10 +302,10 @@ with st.sidebar:
                 {contexto_mat}
                 """
                 
-                if api_key:
+                if proveedor == "☁️ Google Gemini (Nube)":
                     respuesta_bot = consultar_gemini(system_prompt_orientador, user_prompt, api_key, modelo_seleccionado)
                 else:
-                    respuesta_bot = f"🤖 [Modo Simulación - {modelo_seleccionado}]: Respecto a tu consulta '{user_prompt[:30]}...', según el tema cargado en la asignatura, debes revisar la estructura del código ya que omite la definición de parámetros requerida."
+                    respuesta_bot = consultar_ollama_local(system_prompt_orientador, user_prompt, modelo_seleccionado)
 
                 st.write(respuesta_bot)
                 st.session_state.messages.append({"role": "assistant", "content": respuesta_bot})
@@ -302,7 +342,7 @@ with tab_rubrica:
         st.success("✅ ¡Lista de verificación completada! Procede a la entrega de tus archivos en el Paso 2.")
 
 # -----------------------------------------------------------------------------
-# TAB 2: EVALUADOR DE ENTREGABLES (SOPORTE MULTIARCHIVOS, CÓDIGO Y BULLET POINTS)
+# TAB 2: EVALUADOR DE ENTREGABLES
 # -----------------------------------------------------------------------------
 with tab_evaluador:
     st.subheader("Envío de Tareas / Archivos del Proyecto")
@@ -337,7 +377,7 @@ with tab_evaluador:
         if not contenido_estudiante.strip():
             st.error("Por favor, sube al menos un archivo o escribe comentarios antes de analizar.")
         else:
-            with st.spinner(f"Analizando entregables con {modelo_seleccionado}..."):
+            with st.spinner(f"Analizando entregables con {proveedor} ({modelo_seleccionado})..."):
                 contexto_docente = obtener_contexto_asignatura()
                 
                 system_prompt_evaluador = f"""
@@ -360,36 +400,10 @@ with tab_evaluador:
                    - **📌 RESUMEN DE CORRECCIONES Y AÑADIDOS NECESARIOS:** (Un listado exclusivo en BULLET POINTS (* o -) estructurado con todo lo que el estudiante debe corregir o añadir obligatoriamente en su informe o código antes de la entrega final).
                 """
                 
-                if api_key:
+                if proveedor == "☁️ Google Gemini (Nube)":
                     resultado_feedback = consultar_gemini(system_prompt_evaluador, contenido_estudiante, api_key, modelo_seleccionado)
                 else:
-                    resultado_feedback = f"""
-### 📊 Resumen Ejecutivo
-Se han analizado los **{len(nombres_archivos)} entregables** subidos por el estudiante frente a la base de conocimiento oficial del curso.
-
-### 📁 Archivos Evaluados
-{chr(10).join([f'- `{nombre}`' for nombre in nombres_archivos]) if nombres_archivos else '- Texto introducido manualmente'}
-
-### 🔢 Calificación Global Estimada
-**8.2 / 10**
-
-### ✅ Fortalezas Destacadas
-- **Alineación con el temario:** El contenido y código demuestran comprensión de los conceptos clave integrados en la asignatura.
-- **Variedad de Formatos:** Presentación clara combinando informe y scripts de programación.
-
-### 📋 Análisis Detallado por Criterios
-- **Metodología y Código:** Correcta aplicación general, aunque falta comentar las funciones principales en el script.
-- **Precisión Numérica/Algorítmica:** Los resultados calculados coinciden con los datos planteados en el enunciado.
-
----
-
-### 📌 RESUMEN DE CORRECCIONES Y AÑADIDOS NECESARIOS
-*   **Corregir el script (`.py`/`.m`):** Ajustar los valores de los parámetros según lo especificado en el Tema 3.
-*   **Añadir documentación:** Incluir comentarios descriptivos en las funciones principales del código.
-*   **Formato en informe:** Etiquetar correctamente las figuras y gráficas generadas antes de la entrega final.
-
-*(Nota: Añade tu Gemini API Key en el menú lateral para obtener la evaluación generada en tiempo real).*
-                    """
+                    resultado_feedback = consultar_ollama_local(system_prompt_evaluador, contenido_estudiante, modelo_seleccionado)
 
             st.markdown("---")
             st.markdown("## 📊 Informe de Retroalimentación Automática")
@@ -412,4 +426,4 @@ with tab_profesor:
             st.session_state.base_conocimiento = cargar_materiales_predeterminados()
             st.rerun()
     else:
-        st.info("No hay materiales cargados en la carpeta '/materiales'. Para añadir apuntes o guías de código, súbelos directamente a la carpeta 'materiales/' en tu repositorio de GitHub.")
+        st.info("No hay materiales cargados en la carpeta '/materiales'. Para añadir apuntes o guías de código, súbelos directamente a la carpeta 'materiales/' en tu repositorio.")
